@@ -11,13 +11,13 @@
   "axis_lock_threshold": 0.04,
   "scroll_sensitivity":  150,
 
-  "tab_swipe_velocity":  2.0,
+  "tab_swipe_velocity":  0.8,
   "tab_swipe_cooldown":  0.5,
 
-  "app_swipe_velocity":  2.0,
-  "app_swipe_cooldown":  0.5,
+  "app_swipe_velocity":  0.8,
+  "app_swipe_cooldown":  0.6,
   "alt_release_timeout": 4.0,
 
-  "fist_swipe_velocity": 2.0,
+  "fist_swipe_velocity": 0.8,
   "fist_swipe_cooldown": 0.6
 }
