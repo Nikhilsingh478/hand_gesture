@@ -54,6 +54,9 @@ _CONFIG_DEFAULTS = {
     "app_swipe_velocity":  2.0,    # Same velocity threshold for Alt-Tab step; lower = more sensitive
     "app_swipe_cooldown":  0.5,    # Seconds between Alt-Tab steps; lower allows faster stepping
     "alt_release_timeout": 4.0,    # Max seconds Alt stays held without OPEN_HAND; lower = safer faster release
+    # FIST app switch (one-shot quick Alt+Tab)
+    "fist_swipe_velocity": 2.0,    # Normalized-widths/sec for fist swipe; lower = triggers on slower swipe
+    "fist_swipe_cooldown": 0.6,    # Seconds between fist switches; raise if one swipe fires twice
 }
 
 
@@ -400,6 +403,12 @@ class GestureController:
         # PINCH
         self._pinch_last_fire = 0.0
 
+        # FIST app switch
+        self._fist_first     = True
+        self._fist_prev_x    = 0.0
+        self._fist_prev_t    = 0.0
+        self._fist_last_fire = 0.0
+
         # Debug display strings
         self._last_action = ""
 
@@ -506,6 +515,10 @@ class GestureController:
         self._app_prev_x = 0.0
         self._app_prev_t = 0.0
 
+        self._fist_first  = True
+        self._fist_prev_x = 0.0
+        self._fist_prev_t = 0.0
+
         self._active_pose = new_pose
 
     # ------------------------------------------------------------------
@@ -540,10 +553,13 @@ class GestureController:
     def _execute(self, landmarks, now):
         pose = self._active_pose
 
-        if pose in (POSE_NONE, POSE_FIST):
-            # NONE: do nothing; alt safety handled separately.
-            # FIST: pause — do nothing.
+        if pose == POSE_NONE:
+            # Do nothing; alt safety handled separately.
             pass
+
+        elif pose == POSE_FIST:
+            if landmarks is not None:
+                self._do_fist_app_switch(landmarks, now)
 
         elif pose == POSE_PINCH:
             self._do_pinch(now)
@@ -563,6 +579,53 @@ class GestureController:
     # ------------------------------------------------------------------
     # Internal — individual gesture implementations
     # ------------------------------------------------------------------
+
+    def _do_fist_app_switch(self, landmarks, now):
+        """
+        One-shot app switch on a fast horizontal fist swipe.
+        Tracks the WRIST — the most stable point on a closed fist.
+
+        Fist swipes RIGHT → Alt+Tab     (next app in taskbar order)
+        Fist swipes LEFT  → Alt+Shift+Tab (previous app)
+
+        These are quick press-and-release hotkeys (no Alt held between swipes),
+        so Windows commits the switch immediately on each swipe.
+
+        fist_swipe_velocity: lower = triggers on slower swipes
+        fist_swipe_cooldown: raise if a single slow swipe fires twice
+        """
+        cfg = self._cfg
+        wrist = landmarks.landmark[HL.WRIST]
+        cur_x = wrist.x
+
+        if self._fist_first:
+            self._fist_prev_x = cur_x
+            self._fist_prev_t = now
+            self._fist_first  = False
+            return
+
+        dt = now - self._fist_prev_t
+        if dt < 1e-6:
+            return
+
+        velocity = (cur_x - self._fist_prev_x) / dt   # normalized widths / sec
+        self._fist_prev_x = cur_x
+        self._fist_prev_t = now
+
+        if (now - self._fist_last_fire) < cfg["fist_swipe_cooldown"]:
+            return  # Still cooling down from last switch
+
+        if velocity > cfg["fist_swipe_velocity"]:
+            # Swipe right → next app
+            pyautogui.hotkey("alt", "tab")
+            self._fist_last_fire = now
+            self._last_action = "→ next app (fist right)"
+
+        elif velocity < -cfg["fist_swipe_velocity"]:
+            # Swipe left → previous app
+            pyautogui.hotkey("alt", "shift", "tab")
+            self._fist_last_fire = now
+            self._last_action = "← prev app (fist left)"
 
     def _do_pinch(self, now):
         """

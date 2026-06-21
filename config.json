@@ -16,5 +16,8 @@
 
   "app_swipe_velocity":  2.0,
   "app_swipe_cooldown":  0.5,
-  "alt_release_timeout": 4.0
+  "alt_release_timeout": 4.0,
+
+  "fist_swipe_velocity": 2.0,
+  "fist_swipe_cooldown": 0.6
 }
