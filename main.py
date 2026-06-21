@@ -750,6 +750,7 @@ def main():
     cap = cv2.VideoCapture(config["camera_index"])
     cap.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    cap.set(cv2.CAP_PROP_FPS,         60)   # Request 60 fps — camera delivers what it can
 
     if not cap.isOpened():
         print("ERROR: Could not open camera. Make sure no other app is using it.")
