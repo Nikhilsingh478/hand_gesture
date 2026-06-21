@@ -1,3 +1,6 @@
+import json
+from pathlib import Path
+
 import cv2
 import mediapipe as mp
 import numpy as np
@@ -7,13 +10,29 @@ mp_hands = mp.solutions.hands
 
 HAND_CONNECTIONS = list(mp_hands.HAND_CONNECTIONS)
 
-# Camera is mounted sideways — rotate the landscape feed into upright portrait.
-# Flip to cv2.ROTATE_90_COUNTERCLOCKWISE if the image comes out upside-down.
-ROTATE_CODE = cv2.ROTATE_90_CLOCKWISE
+_ROTATION_MAP = {
+    "none": None,
+    "cw": cv2.ROTATE_90_CLOCKWISE,           # 90° right
+    "ccw": cv2.ROTATE_90_COUNTERCLOCKWISE,   # 90° left
+    "180": cv2.ROTATE_180,
+}
 
-# Portrait overlay (taller than wide) to match the rotated vertical feed.
-OVERLAY_W = 180
-OVERLAY_H = 240
+
+def load_config():
+    config_path = Path(__file__).with_name("config.json")
+    defaults = {"camera_index": 0, "rotation": "none"}
+    if not config_path.exists():
+        return defaults
+    with config_path.open(encoding="utf-8") as f:
+        data = json.load(f)
+    return {**defaults, **data}
+
+
+def overlay_size(rotation):
+    # Portrait when rotated 90°; landscape when not.
+    if rotation in ("cw", "ccw"):
+        return 180, 240
+    return 240, 180
 
 # Transparent color key — pixels this color become see-through
 _TRANSPARENT_KEY = "black"
@@ -29,13 +48,16 @@ HAND_BGR = (136, 255, 0)
 class SkeletonOverlay:
     """Small always-on-top floating window that draws the hand skeleton(s)."""
 
-    def __init__(self):
+    def __init__(self, width, height):
+        self._width = width
+        self._height = height
+
         self._root = tk.Tk()
         self._root.withdraw()           # hide the invisible root window
 
         self._win = tk.Toplevel(self._root)
         self._win.title("Hand Overlay")
-        self._win.geometry(f"{OVERLAY_W}x{OVERLAY_H}+40+40")
+        self._win.geometry(f"{width}x{height}+40+40")
         self._win.resizable(False, False)
         self._win.overrideredirect(True)    # borderless / no title bar
         self._win.wm_attributes("-topmost", True)
@@ -47,7 +69,7 @@ class SkeletonOverlay:
 
         self._canvas = tk.Canvas(
             self._win,
-            width=OVERLAY_W, height=OVERLAY_H,
+            width=width, height=height,
             bg=_TRANSPARENT_KEY,
             highlightthickness=0,
         )
@@ -126,7 +148,7 @@ class SkeletonOverlay:
             pass
 
     def _draw_skeleton(self, landmarks, color):
-        w, h = OVERLAY_W, OVERLAY_H
+        w, h = self._width, self._height
 
         for a, b in HAND_CONNECTIONS:
             lm_a = landmarks.landmark[a]
@@ -189,7 +211,16 @@ def draw_hint(frame, w, h):
 # ---------------------------------------------------------------------------
 
 def main():
-    cap = cv2.VideoCapture(0)
+    config = load_config()
+    rotation = config["rotation"]
+    rotate_code = _ROTATION_MAP.get(rotation)
+    if rotation not in _ROTATION_MAP:
+        print(f"WARNING: Unknown rotation '{rotation}', using none.")
+        rotate_code = None
+
+    overlay_w, overlay_h = overlay_size(rotation)
+
+    cap = cv2.VideoCapture(config["camera_index"])
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
@@ -197,7 +228,7 @@ def main():
         print("ERROR: Could not open camera. Make sure no other app is using it.")
         return
 
-    overlay = SkeletonOverlay()
+    overlay = SkeletonOverlay(overlay_w, overlay_h)
 
     camera_hidden = False
     fullscreen = False
@@ -218,9 +249,9 @@ def main():
             if not ret:
                 break
 
-            # Rotate sideways-mounted feed into upright portrait, then mirror
-            # so it still behaves like a selfie view.
-            frame = cv2.rotate(frame, ROTATE_CODE)
+            # Optional rotation (see config.json), then mirror for selfie view.
+            if rotate_code is not None:
+                frame = cv2.rotate(frame, rotate_code)
             frame = cv2.flip(frame, 1)
             h, w = frame.shape[:2]
 
