@@ -1,0 +1,138 @@
+I have an existing GitHub repo (Nikhilsingh478/hand_gesture). This prompt REPLACES the gesture-action
+design from any earlier request — if main.py already has position-based scroll, dead_zone, or "flick"
+logic in it, rip that out entirely and rebuild the gesture layer from scratch per this spec. Read the
+whole thing before touching anything.
+
+GUARANTEED BASELINE — do not break or restructure this part:
+- Webcam capture via cv2.VideoCapture, MediaPipe Hands (mp_hands.Hands, model_complexity=0,
+  min_detection_confidence=0.75, min_tracking_confidence=0.65, max_num_hands=2)
+- Glowing green skeleton drawn on the camera feed (draw_glowing_hand) + a small always-on-top
+  draggable Tkinter overlay mirroring it (SkeletonOverlay class)
+- load_config() reading config.json, including "camera_index" and "rotation" (none/cw/ccw/180) —
+  keep the rotation fix exactly as it is, do not touch it
+- requirements.txt: mediapipe==0.10.14, opencv-python==4.10.0.84, pyautogui==0.9.54, numpy==1.26.4 —
+  don't change versions without telling me why
+- Set pyautogui.PAUSE = 0 at startup if not already set (otherwise its default 0.1s delay after every
+  call throttles the whole webcam loop, since some of these gestures fire near every frame)
+- launch.command, build_app.command, Info.plist are macOS-only packaging — ignore them completely,
+  I run this via `python main.py` on Windows
+
+POSE CLASSIFICATION (use mp_hands.HandLandmark constants, not raw integers, throughout):
+- A non-thumb finger is "curled" if its tip is closer to WRIST than its own MCP knuckle is to WRIST
+  (this is rotation-independent — already used for fist detection, reuse it). "Extended" = not curled.
+- Thumb extended ≈ THUMB_TIP farther from WRIST than THUMB_MCP is from WRIST. Comment in the code that
+  this is the least reliable of the five and likely needs the most tuning, since the thumb doesn't
+  curl into the palm as cleanly as the other fingers.
+- Classify the current frame into exactly one pose: FIST, PINCH, TWO_FINGER, FOUR_FINGER, OPEN_HAND,
+  or NONE, using this priority order when multiple could match: FIST > PINCH > TWO_FINGER >
+  FOUR_FINGER > OPEN_HAND > NONE.
+  - FIST: at least config["fist_curl_fingers"] (default 3) of the 4 non-thumb fingers curled
+  - PINCH: (distance(THUMB_TIP, INDEX_FINGER_TIP) / hand_scale) < config["pinch_threshold"] (default
+    0.35), where hand_scale = distance(WRIST, MIDDLE_FINGER_MCP)
+  - TWO_FINGER: index + middle extended, ring + pinky curled (ignore thumb state)
+  - FOUR_FINGER: index + middle + ring + pinky all extended, thumb NOT extended (tucked)
+  - OPEN_HAND: all 5 fingers extended, including thumb
+  - NONE: anything else, or no hand detected this frame
+
+TEMPORAL SMOOTHING (required — fast swipes cause motion blur and single-frame misclassification):
+Keep a rolling buffer of the last 4 frames' raw pose classification. The "active pose" only changes
+once at least 3 of the last 4 raw classifications agree on the new pose. This prevents the system from
+flickering between poses mid-swipe. On every active-pose change, reset all per-pose tracking state
+(previous x/y, axis lock, accumulated displacement, swipe cooldown timers) — stale data from the
+previous pose must never leak into the new one.
+
+GESTURE BEHAVIOR BY ACTIVE POSE:
+
+1. NONE (no hand / unrecognized pose) → do nothing. If a hand was previously detected and is now gone,
+   reset all tracking state AND force-release Alt if it's currently held down by gesture #5 below
+   (critical safety — see requirement at the bottom).
+
+2. FIST → pause. Do nothing else this frame regardless of motion.
+
+3. PINCH → press config["pinch_key"] (default "l", read as a string from config, never hardcoded in
+   the Python logic) via pyautogui.press(). Only actually fire if config["like_key_cooldown"] seconds
+   (default 1.0) have passed since the last press, so holding the pinch doesn't spam the key.
+
+4. TWO_FINGER → continuous delta-based scroll, like a trackpad, NOT the old absolute-position model.
+   - Track the midpoint between INDEX_FINGER_TIP and MIDDLE_FINGER_TIP each frame.
+   - On the first frame this pose becomes active, just record the position, don't scroll yet.
+   - On every subsequent frame while still TWO_FINGER: compute dx and dy = current midpoint minus
+     previous midpoint (normalized 0-1 coords).
+   - AXIS LOCK: accumulate |dx| and |dy| separately from the moment this pose became active. Once
+     either accumulated value exceeds config["axis_lock_threshold"] (default 0.04), lock the gesture
+     to that axis (vertical or horizontal) for the rest of this continuous pose — don't re-evaluate
+     axis again until the pose breaks and restarts. This stops a slightly diagonal swipe from
+     flickering between scroll directions.
+   - If locked vertical: pyautogui.scroll(int(dy * config["scroll_sensitivity"])) every frame. Do NOT
+     flip the sign — dy negative (fingers moving up the frame) should naturally scroll down (negative
+     pyautogui.scroll argument), dy positive (fingers moving down) scrolls up. Verify this matches
+     "slide up = scroll down, slide down = scroll up" before considering this gesture done.
+   - If locked horizontal: pyautogui.hscroll(int(dx * config["scroll_sensitivity"])) every frame, same
+     sign logic — dx positive (moving right on screen) scrolls one direction, dx negative scrolls the
+     other. Don't worry about which is which yet, just keep it consistent and we'll flip a sign in
+     config if it tests backwards.
+   - config["scroll_sensitivity"] default 150 — comment that raising it makes scroll faster per unit
+     of hand movement, lowering it makes it feel heavier/slower.
+
+5. FOUR_FINGER → one-shot Chrome tab switch on a fast horizontal swipe, NOT continuous.
+   - Track the midpoint of the 4 extended fingertips each frame. Compute horizontal velocity =
+     dx / dt since last frame (dt in seconds).
+   - If velocity > config["tab_swipe_velocity"] (default 2.0, normalized-frame-widths/sec) and moving
+     right (positive) → pyautogui.hotkey('ctrl', 'tab') (next tab, "right tab")
+   - If velocity < -config["tab_swipe_velocity"] and moving left → pyautogui.hotkey('ctrl', 'shift',
+     'tab') (previous tab, "left tab")
+   - After firing, require config["tab_swipe_cooldown"] seconds (default 0.5) before another swipe in
+     this pose can fire again, so one continuous swipe motion doesn't change 3 tabs at once.
+
+6. OPEN_HAND → step through Windows' Alt-Tab switcher, held open for the duration of the pose.
+   - On the FIRST frame this pose becomes active: pyautogui.keyDown('alt'). Record that alt is now
+     "held by this gesture" in a state variable (e.g. self._alt_held = True). Do not press it again on
+     subsequent frames while still in this pose.
+   - While still OPEN_HAND: track horizontal velocity the same way as gesture #5. On a fast rightward
+     swipe (same threshold/cooldown pattern, reuse or duplicate config["tab_swipe_velocity"] and
+     config["tab_swipe_cooldown"] under new names like config["app_swipe_velocity"] /
+     config["app_swipe_cooldown"]) → pyautogui.press('tab') (steps forward, since Alt is already held).
+     On a fast leftward swipe → pyautogui.keyDown('shift'); pyautogui.press('tab');
+     pyautogui.keyUp('shift') (steps backward).
+   - The MOMENT the active pose changes away from OPEN_HAND to anything else (including NONE) →
+     pyautogui.keyUp('alt') immediately, and set self._alt_held = False. This commits whichever app
+     was highlighted. This release must happen in the pose-transition logic, not buried inside the
+     OPEN_HAND branch, so it cannot be skipped if the pose changes abruptly.
+
+CRITICAL SAFETY REQUIREMENT — do not ship without this:
+If self._alt_held is True and the hand disappears entirely (MediaPipe returns no landmarks) OR more
+than config["alt_release_timeout"] seconds (default 4.0) pass without seeing OPEN_HAND again, force
+pyautogui.keyUp('alt') and set self._alt_held = False regardless of what the pose-transition logic
+thinks happened. A stuck Alt key turns every subsequent keystroke into an Alt-shortcut — this has to
+be bulletproof, not best-effort.
+
+ON-SCREEN DEBUG LABEL (required — I'm tuning these thresholds by eye):
+Reuse the style of the existing draw_hint function to show, every frame, in the corner of the existing
+camera window: the current active pose (FIST / PINCH / TWO_FINGER / FOUR_FINGER / OPEN_HAND / NONE),
+and if relevant, the locked scroll axis, the last action fired (e.g. "→ next tab", "→ Like sent",
+"→ Alt held, step left"), and whether Alt is currently held by the gesture system.
+
+CONFIG.JSON — add these keys if missing, don't touch existing camera_index/rotation:
+fist_curl_fingers (3), pinch_threshold (0.35), pinch_key ("l"), like_key_cooldown (1.0),
+axis_lock_threshold (0.04), scroll_sensitivity (150), tab_swipe_velocity (2.0),
+tab_swipe_cooldown (0.5), app_swipe_velocity (2.0), app_swipe_cooldown (0.5),
+alt_release_timeout (4.0)
+REMOVE if present from an earlier build: dead_zone, max_scroll_speed, flick_velocity,
+flick_scroll_amount — the scroll model these belonged to no longer exists.
+
+CODE QUALITY:
+- Use mp_hands.HandLandmark constants everywhere, not raw integers
+- Comment every threshold with what it controls and which direction to nudge it if it misfires
+- A single state machine/class tracking active pose, per-pose data, and alt-held status — don't
+  scatter pose-transition logic across multiple disconnected functions, the alt-release safety
+  requirement above depends on this being centralized
+
+WHAT NOT TO DO:
+- Don't touch launch.command, build_app.command, Info.plist, or the rotation config logic
+- Don't add cursor movement or mouse clicking — this is scroll + tab/app switching + one key press,
+  nothing more
+- Don't remove the SkeletonOverlay floating window or the glowing skeleton drawing
+
+When done, give me: (1) a cheat sheet of every config key and what raising/lowering it does, and
+(2) a plain explanation of exactly how the OPEN_HAND/Alt-Tab gesture behaves with only 2 apps open
+vs. several, since that one doesn't behave quite like the Chrome tab version.
