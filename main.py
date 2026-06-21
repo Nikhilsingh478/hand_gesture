@@ -553,13 +553,10 @@ class GestureController:
     def _execute(self, landmarks, now):
         pose = self._active_pose
 
-        if pose == POSE_NONE:
-            # Do nothing; alt safety handled separately.
+        if pose in (POSE_NONE, POSE_FIST):
+            # NONE: nothing to do.
+            # FIST: pause — do nothing.
             pass
-
-        elif pose == POSE_FIST:
-            if landmarks is not None:
-                self._do_fist_app_switch(landmarks, now)
 
         elif pose == POSE_PINCH:
             self._do_pinch(now)
@@ -574,58 +571,11 @@ class GestureController:
 
         elif pose == POSE_OPEN_HAND:
             if landmarks is not None:
-                self._do_open_hand_alttab(landmarks, now)
+                self._do_open_hand_app_switch(landmarks, now)
 
     # ------------------------------------------------------------------
     # Internal — individual gesture implementations
     # ------------------------------------------------------------------
-
-    def _do_fist_app_switch(self, landmarks, now):
-        """
-        One-shot app switch on a fast horizontal fist swipe.
-        Tracks the WRIST — the most stable point on a closed fist.
-
-        Fist swipes RIGHT → Alt+Tab     (next app in taskbar order)
-        Fist swipes LEFT  → Alt+Shift+Tab (previous app)
-
-        These are quick press-and-release hotkeys (no Alt held between swipes),
-        so Windows commits the switch immediately on each swipe.
-
-        fist_swipe_velocity: lower = triggers on slower swipes
-        fist_swipe_cooldown: raise if a single slow swipe fires twice
-        """
-        cfg = self._cfg
-        wrist = landmarks.landmark[HL.WRIST]
-        cur_x = wrist.x
-
-        if self._fist_first:
-            self._fist_prev_x = cur_x
-            self._fist_prev_t = now
-            self._fist_first  = False
-            return
-
-        dt = now - self._fist_prev_t
-        if dt < 1e-6:
-            return
-
-        velocity = (cur_x - self._fist_prev_x) / dt   # normalized widths / sec
-        self._fist_prev_x = cur_x
-        self._fist_prev_t = now
-
-        if (now - self._fist_last_fire) < cfg["fist_swipe_cooldown"]:
-            return  # Still cooling down from last switch
-
-        if velocity > cfg["fist_swipe_velocity"]:
-            # Swipe right → next app
-            pyautogui.hotkey("alt", "tab")
-            self._fist_last_fire = now
-            self._last_action = "→ next app (fist right)"
-
-        elif velocity < -cfg["fist_swipe_velocity"]:
-            # Swipe left → previous app
-            pyautogui.hotkey("alt", "shift", "tab")
-            self._fist_last_fire = now
-            self._last_action = "← prev app (fist left)"
 
     def _do_pinch(self, now):
         """
@@ -733,34 +683,25 @@ class GestureController:
             self._tab_last_fire = now
             self._last_action = "← prev tab (Ctrl+Shift+Tab)"
 
-    def _do_open_hand_alttab(self, landmarks, now):
+    def _do_open_hand_app_switch(self, landmarks, now):
         """
-        Hold Alt open for the duration of the pose; step through the Windows
-        Alt-Tab switcher with horizontal swipes.
+        One-shot app switch on a fast horizontal open-hand swipe.
 
-        Alt is pressed on the FIRST frame of this pose.
-        Alt is released in _on_pose_transition() the moment the pose changes,
-        which commits whichever app was highlighted.
+        Open hand swipes RIGHT → Alt+Tab           (next app)
+        Open hand swipes LEFT  → Alt+Shift+Tab     (previous app)
 
-        app_swipe_velocity / app_swipe_cooldown: same tuning logic as tab gesture.
+        Each swipe is a quick press-and-release — Windows commits the switch
+        immediately, no Alt is held between swipes.
+
+        Tracks the WRIST for a stable reference point (fingertip spread on an
+        open hand can wobble; wrist stays steady during a horizontal swipe).
+
+        app_swipe_velocity: lower = triggers on slower swipes
+        app_swipe_cooldown: raise if one swipe switches more than one app
         """
-        cfg = self._cfg
-
-        # First frame of pose: press and hold Alt to open the switcher
-        if not self._alt_held:
-            pyautogui.keyDown("alt")
-            self._alt_held = True
-            self._last_action = "→ Alt held (Alt-Tab open)"
-
-        # Use midpoint of all 5 fingertips for horizontal velocity tracking
-        tips = [
-            landmarks.landmark[HL.THUMB_TIP],
-            landmarks.landmark[HL.INDEX_FINGER_TIP],
-            landmarks.landmark[HL.MIDDLE_FINGER_TIP],
-            landmarks.landmark[HL.RING_FINGER_TIP],
-            landmarks.landmark[HL.PINKY_TIP],
-        ]
-        cur_x = sum(t.x for t in tips) / 5.0
+        cfg  = self._cfg
+        wrist = landmarks.landmark[HL.WRIST]
+        cur_x = wrist.x
 
         if self._app_first:
             self._app_prev_x = cur_x
@@ -772,26 +713,22 @@ class GestureController:
         if dt < 1e-6:
             return
 
-        velocity = (cur_x - self._app_prev_x) / dt
+        velocity = (cur_x - self._app_prev_x) / dt   # normalized widths / sec
         self._app_prev_x = cur_x
         self._app_prev_t = now
 
         if (now - self._app_last_fire) < cfg["app_swipe_cooldown"]:
-            return
+            return  # Cooldown — ignore this frame
 
         if velocity > cfg["app_swipe_velocity"]:
-            # Step forward — Alt is already held, just press Tab
-            pyautogui.press("tab")
+            pyautogui.hotkey("alt", "tab")
             self._app_last_fire = now
-            self._last_action = "→ Alt+Tab step forward"
+            self._last_action = "→ next app (open hand right)"
 
         elif velocity < -cfg["app_swipe_velocity"]:
-            # Step backward — Shift+Tab while Alt is held
-            pyautogui.keyDown("shift")
-            pyautogui.press("tab")
-            pyautogui.keyUp("shift")
+            pyautogui.hotkey("alt", "shift", "tab")
             self._app_last_fire = now
-            self._last_action = "← Alt+Shift+Tab step backward"
+            self._last_action = "← prev app (open hand left)"
 
 
 # ---------------------------------------------------------------------------
